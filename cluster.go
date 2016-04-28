@@ -29,8 +29,9 @@ type topicPartition struct {
 }
 
 type offsetInfo struct {
-	Offset   int64
-	Metadata string
+	Offset              int64
+	Metadata            string
+	LastCommittedOffset int64
 }
 
 func (i offsetInfo) NextOffset(fallback int64) int64 {

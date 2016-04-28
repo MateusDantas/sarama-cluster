@@ -89,12 +89,24 @@ func (c *partitionConsumer) State() partitionState {
 	return state
 }
 
+func (c *partitionConsumer) WasCommitted(offset int64) bool {
+	if c == nil {
+		return false
+	}
+
+	c.mutex.Lock()
+	defer c.mutex.Unlock()
+
+	return c.state.Info.LastCommittedOffset > offset
+}
+
 func (c *partitionConsumer) MarkCommitted(offset int64) {
 	if c == nil {
 		return
 	}
 
 	c.mutex.Lock()
+	c.state.Info.LastCommittedOffset = offset
 	if offset == c.state.Info.Offset {
 		c.state.Dirty = false
 	}

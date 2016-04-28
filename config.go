@@ -10,6 +10,9 @@ import (
 type Config struct {
 	sarama.Config
 
+	// If enabled, messages will be drained from the normal channel of messages to a safe
+	// channel as they get committed (default disabled).
+	safeConsume bool
 	// Group is the namespace for group management properties
 	Group struct {
 		// The strategy to use for the allocation of partitions to consumers (defaults to StrategyRange)

@@ -8,6 +8,8 @@ import (
 	"github.com/Shopify/sarama"
 )
 
+var ErrOffsetWaitingTimeout = errors.New("offset: sarama timed out waiting for offset to be committed")
+
 // Consumer is a cluster group consumer
 type Consumer struct {
 	client *Client
@@ -24,8 +26,9 @@ type Consumer struct {
 	dying, dead chan none
 
 	consuming     int32
-	errors        chan error
+	errors        chan error	
 	messages      chan *sarama.ConsumerMessage
+	messagesSafe  chan *sarama.ConsumerMessage
 	notifications chan *Notification
 }
 
@@ -50,12 +53,15 @@ func NewConsumerFromClient(client *Client, groupID string, topics []string) (*Co
 
 		errors:        make(chan error, client.config.ChannelBufferSize),
 		messages:      make(chan *sarama.ConsumerMessage, client.config.ChannelBufferSize),
+		messagesSafe:  make(chan *sarama.ConsumerMessage, client.config.ChannelBufferSize),
 		notifications: make(chan *Notification, 1),
 	}
 	if err := c.client.RefreshCoordinator(groupID); err != nil {
 		return nil, err
 	}
-
+	if client.config.safeConsume {
+		go c.messagesSafeDrainLoop()
+	}
 	go c.mainLoop()
 	return c, nil
 }
@@ -79,6 +85,10 @@ func NewConsumer(addrs []string, groupID string, topics []string, config *Config
 // Messages returns the read channel for the messages that are returned by
 // the broker.
 func (c *Consumer) Messages() <-chan *sarama.ConsumerMessage { return c.messages }
+
+// MessagesSafe returns a read channel for the messages that are returned by
+// the broker and were already committed to the backend store.
+func (c *Consumer) MessagesSafe() <-chan *sarama.ConsumerMessage { return c.messagesSafe }
 
 // Errors returns a read channel of errors that occur during offset management, if
 // enabled. By default, errors are logged and not returned over this channel. If
@@ -241,6 +251,54 @@ func (c *Consumer) cmLoop(stop <-chan struct{}, done chan<- struct{}) {
 			return
 		}
 	}
+}
+
+// Mark all incoming offsets and drain committed messages to the safe channel in parallel
+func (c *Consumer) messagesSafeDrainLoop() {
+	auxMessages := make(chan *sarama.ConsumerMessage, c.client.config.ChannelBufferSize)
+	// This first loop ensures that the draining process runs much faster, by marking
+	// the offsets as the second loop drains the committed messages in parallel
+	go func() {
+		for {
+			select {
+			case msg := <- c.Messages():
+				c.MarkOffset(msg, "consumed")
+				auxMessages <- msg
+			case <- c.dying:
+				return
+			}
+		}
+	}()
+	for {
+		select {
+		case msg := <- auxMessages:
+			err := c.waitForOffset(msg, 1 * time.Minute)
+			if err != nil {
+				c.handleError(err)
+				return
+			}
+			c.messagesSafe <- msg
+		case <- c.dying:
+			return
+		}
+	}
+}
+
+func (c *Consumer) waitForOffset(msg *sarama.ConsumerMessage, timeout time.Duration) error {
+	ticker := time.NewTicker(c.client.config.Consumer.Offsets.CommitInterval)
+	defer ticker.Stop()
+
+	timeoutChan := time.After(timeout)
+	for {
+		select {
+		case <-ticker.C:
+			if c.subs.Fetch(msg.Topic, msg.Partition).WasCommitted(msg.Offset) {
+				return nil
+			}
+		case <-timeoutChan:
+			return ErrOffsetWaitingTimeout			
+		}
+	}	
 }
 
 func (c *Consumer) rebalanceError(err error, notification *Notification) {
@@ -549,6 +607,10 @@ func (c *Consumer) createConsumer(topic string, partition int32, info offsetInfo
 	// Start partition consumer goroutine
 	go pc.Loop(c.messages, c.errors)
 
+	if c.config.SafeConsume {
+		go c.messagesSafeDrainLoop()
+	}
+	
 	return nil
 }
 
