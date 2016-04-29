@@ -80,6 +80,30 @@ func NewConsumer(addrs []string, groupID string, topics []string, config *Config
 // the broker.
 func (c *Consumer) Messages() <-chan *sarama.ConsumerMessage { return c.messages }
 
+// BatchOfMessages returns a slice with committed messages.
+// It will timeout after 2 * CommitInterval and return only the messages it could get
+// within this time.
+// Returns nil in case an error occur while trying to commit the offsets
+func (c *Consumer) BatchOfMessages(size int, metadata string) []*sarama.ConsumerMessage {
+	var batchOfMessages []*sarama.ConsumerMessage
+	timeout := time.After(2 * c.client.config.Consumer.Offsets.CommitInterval)
+	for i := 0; i < size; i++ {
+		select {
+		case msg := <- c.Messages():
+			c.MarkOffset(msg, metadata)
+			batchOfMessages = append(batchOfMessages, msg)
+		case <-timeout:
+			break
+		}
+	}
+	if err := c.commitOffsetsWithRetry(c.client.config.Group.Offsets.Retry.Max); err != nil {
+		c.handleError(err)
+		return nil
+	}
+
+	return batchOfMessages
+}
+
 // Errors returns a read channel of errors that occur during offset management, if
 // enabled. By default, errors are logged and not returned over this channel. If
 // you want to implement any custom error handling, set your config's
