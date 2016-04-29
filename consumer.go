@@ -4,7 +4,7 @@ import (
 	"sort"
 	"sync/atomic"
 	"time"
-
+	
 	"github.com/Shopify/sarama"
 )
 
@@ -88,11 +88,16 @@ func (c *Consumer) BatchOfMessages(size int, metadata string) []*sarama.Consumer
 	var batchOfMessages []*sarama.ConsumerMessage
 	timeout := time.After(2 * c.client.config.Consumer.Offsets.CommitInterval)
 	for i := 0; i < size; i++ {
+		timedOut := false
 		select {
 		case msg := <- c.Messages():
 			c.MarkOffset(msg, metadata)
 			batchOfMessages = append(batchOfMessages, msg)
 		case <-timeout:
+			timedOut = true
+			break
+		}
+		if timedOut {
 			break
 		}
 	}
